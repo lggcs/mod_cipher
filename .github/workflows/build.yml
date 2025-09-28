@@ -2,13 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
   test:
-    name: Test on Python ${{ matrix.python-version }} (extras: ${{ matrix.extra }})
+    name: "Test on Python ${{ matrix.python-version }} (extras: ${{ matrix.extra }})"
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -66,7 +66,7 @@ jobs:
           echo "Smoke encode/decode OK"
 
       - name: Run tests
-        if: always()
+        if: ${{ always() }}
         run: |
           pytest -q || echo "No tests or tests failed"
 
@@ -91,5 +91,6 @@ jobs:
       - name: Build sdist and wheel
         run: |
           python -m build --sdist --wheel --outdir dist
+
       - name: List artifacts
         run: ls -lah dist
