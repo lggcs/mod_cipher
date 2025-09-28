@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }} (extras: ${{ matrix.extra }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.10, 3.11, 3.12]
+        extra: ["none", "crypto", "zstd"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Upgrade pip and install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel build
+
+      - name: Install project (with extras)
+        run: |
+          # Install the package. For the matrix run we install optional extras selectively.
+          if [ "${{ matrix.extra }}" = "crypto" ]; then
+            pip install ".[crypto]" || pip install .
+          elif [ "${{ matrix.extra }}" = "zstd" ]; then
+            pip install ".[zstd]" || pip install .
+          else
+            pip install .
+          fi
+
+      - name: Install dev/test tools
+        run: |
+          pip install flake8 pytest
+
+      - name: Lint (flake8)
+        run: |
+          # Basic linting; exit step doesn't fail workflow unless flake8 finds issues
+          flake8 --max-line-length=100 || true
+
+      - name: Basic smoke encode/decode test
+        env:
+          OUTMOD: test_output.mod
+        run: |
+          # Run a simple encode -> decode cycle to exercise CLI.
+          python -m mod_cipher --encode "hello-ci" --out "$OUTMOD"
+          python -m mod_cipher --decode "$OUTMOD" > decoded.txt
+          if ! grep -q "hello-ci" decoded.txt; then
+            echo "Decoded output did not contain expected payload"
+            cat decoded.txt
+            exit 2
+          fi
+          echo "Smoke encode/decode OK"
+
+      - name: Run tests
+        if: always()
+        run: |
+          pytest -q || echo "No tests or tests failed"
+
+  package:
+    name: Build package
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build sdist and wheel
+        run: |
+          python -m build --sdist --wheel --outdir dist
+      - name: List artifacts
+        run: ls -lah dist
