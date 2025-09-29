@@ -44,7 +44,7 @@ jobs:
 
       - name: Install dev/test tools
         run: |
-          pip install flake8 pytest zstandard
+          pip install flake8 pytest
 
       - name: Lint (flake8)
         run: |
