@@ -28,13 +28,17 @@ try:
 except ImportError:
     HAS_CRYPTO = False
 
+
 # try zstd
 HAS_ZSTD = True
 try:
     import zstandard as zstd
-    ZSTD_MAGIC = b"\x28\xB5\x2F\xFD"
 except ImportError:
+    zstd = None
     HAS_ZSTD = False
+
+# zstd frame magic (always defined for safe checks)
+ZSTD_MAGIC = b"\x28\xB5\x2F\xFD"
 
 # ----------------------------------------
 # Audio/mod constants & framing parameters
