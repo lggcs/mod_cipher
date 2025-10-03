@@ -14,6 +14,7 @@ import struct
 import sys
 import os
 import getpass
+import random
 
 import numpy as np
 
@@ -46,9 +47,6 @@ ZSTD_MAGIC = b"\x28\xB5\x2F\xFD"
 
 SR             = 44100
 BPM            = 140
-BEATS_PER_F    = 1.0
-SAMPLES_PER_B  = int((60.0 / BPM) * SR)
-FRAME_SAMPLES  = int(BEATS_PER_F * SAMPLES_PER_B)
 
 PREAMBLE_FRAMES = 8
 HEADER_FRAMES   = 4   # 2 bytes → 4 nibbles
@@ -62,10 +60,6 @@ KEY_LEN        = 32
 MAX_PAYLOAD = 0xFFFF  # 65535 bytes (~64 KiB)
 
 # Musical space: 16 dyads → 4-bit symbols
-NOTE_FREQS = {
-    "A3":220.00, "C4":261.63, "D4":293.66, "E4":329.63,
-    "G4":392.00, "A4":440.00, "C5":523.25, "E5":659.25,
-}
 DYADS = [
     ("A3","C4"),("A3","E4"),("A3","G4"),("A3","A4"),
     ("C4","E4"),("C4","G4"),("C4","A4"),("C4","C5"),
@@ -86,12 +80,6 @@ ARPEGGIO_SETS = [
     [1,6,3,7,4,1,6,3],[0,4,7,0,4,7,5,4],
 ]
 LEAD_NOTES = ["A3","C4","D4","E4","G4","A4","C5","E5"]
-
-BASS_SEQ = [
-    ("A2",110.00),("E3",164.81),("A2",110.00),("G2",98.00),
-    ("A2",110.00),("E3",164.81),("A2",110.00),("D3",146.83),
-]
-DRUM_SEQ = [1,0,1,0,0,1,0,1]
 
 # ----------------------------------------
 # CRC16 & nibble/frame utilities
@@ -135,9 +123,6 @@ def triangle_wave(freq, length, amp):
     tri= 2.0*np.abs(2.0*(ph - np.floor(ph+0.5))) - 1.0
     return (amp*tri).astype(np.float32)
 
-def white_noise(length, amp):
-    return (amp*(np.random.rand(length)*2 - 1)).astype(np.float32)
-
 def apply_fade(buf):
     edge = int(0.003 * SR)
     if len(buf) < 2*edge:
@@ -147,6 +132,140 @@ def apply_fade(buf):
     buf[:edge]  *= fi
     buf[-edge:] *= fo
     return buf
+
+# ----------------------------------------
+# Procedural instrument builders (randomized naming)
+# ----------------------------------------
+
+def _rand_name(prefixes=("DRM","SYN","WAV","NOI","ORG"),
+               suffixes=("01","02","A","B","X","Z")):
+    return (random.choice(prefixes) + random.choice(suffixes)).ljust(4)[:4]
+
+def kick_drum(length=512, amp=1.0):
+    t = np.arange(length) / length
+    # pitch drops over time; exponential decay envelope
+    freq = 60 + 120 * (1 - t)
+    phase = np.cumsum(freq) / length
+    wave = np.sin(2*np.pi*phase)
+    env  = np.exp(-6*t)
+    return (amp * wave * env).astype(np.float32)
+
+def snare_drum(length=512, amp=0.8):
+    t = np.arange(length) / length
+    noise = np.random.randn(length)
+    # add a weak tone component for body
+    tone  = np.sin(2*np.pi*200*np.arange(length)/SR) * 0.15
+    env   = np.exp(-12*t)
+    return (amp * (noise + tone) * env).astype(np.float32)
+
+def hi_hat(length=256, amp=0.6):
+    noise = np.sign(np.random.randn(length))
+    env   = np.linspace(1,0,length)
+    # simple high-pass feel by alternating sign
+    hiss  = noise * np.sign(np.sin(2*np.pi*4000*np.arange(length)/SR))
+    return (amp * hiss * env).astype(np.float32)
+
+def saw_wave(freq, length, amp):
+    t = np.arange(length) / SR
+    ph = (t*freq) % 1.0
+    return (amp*(2*ph - 1)).astype(np.float32)
+
+def pulse_wave(freq, length, amp):
+    duty = random.choice([0.125,0.25,0.33,0.5,0.67,0.75])
+    return square_wave(freq, length, amp, duty)
+
+def organ_wave(freq, length, amp):
+    t = np.arange(length) / SR
+    wave = (np.sin(2*np.pi*freq*t) +
+            0.5*np.sin(2*np.pi*2*freq*t) +
+            0.25*np.sin(2*np.pi*3*freq*t))
+    return (amp*wave/1.75).astype(np.float32)
+
+def make_instrument_bank(seed=None):
+    """
+    Build a minimal band with roles: chord1, chord2, lead, drums (kick/snare/hat).
+    Names are randomized; instruments are procedurally varied.
+    Returns (samples, sample_map) where samples is a list of dicts for write_mod,
+    and sample_map maps logical voices to sample indices (1-based for MOD).
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed & 0xFFFFFFFF)
+
+    # Melodic voices
+    chord1_name = _rand_name(("SYN","PUL","TRI","WAV"), ("01","A","X"))
+    chord2_name = _rand_name(("SYN","PUL","TRI","WAV"), ("02","B","Z"))
+    lead_name   = _rand_name(("LEAD","SYN","ORG"), ("01","A","X"))
+
+    # Slight parameter jitter
+    def rf(base): return base * (1.0 + random.uniform(-0.03, 0.03))
+    def ra(base): return max(0.3, min(0.9, base + random.uniform(-0.1, 0.1)))
+
+    # Choose wave types for variety
+    chord1_gen = lambda l, f=rf(440), a=ra(0.8): pulse_wave(f, l, a)
+    chord2_gen = lambda l, f=rf(330), a=ra(0.8): triangle_wave(f, l, a)
+    lead_gen   = lambda l, f=rf(550), a=ra(0.75): organ_wave(f, l, a)
+
+    # Drums (always include; rhythm channel prefers these)
+    kick_name  = _rand_name(("DRM","KIK"), ("01","A"))
+    snare_name = _rand_name(("DRM","SNR"), ("01","B"))
+    hat_name   = _rand_name(("DRM","HAT"), ("01","C"))
+
+    samp_len = 1024
+    samples = []
+    def add_sample(name, genfunc, play_len_mult=2):
+        buf = apply_fade(genfunc(samp_len*play_len_mult))
+        samples.append({
+            "name":         name,
+            "length":       samp_len,
+            "finetune":     0,
+            "volume":       64,
+            "repeat_offset":0,
+            "repeat_length":1,
+            "wave":         buf
+        })
+
+    add_sample(chord1_name, chord1_gen)
+    add_sample(chord2_name, chord2_gen)
+    add_sample(lead_name,   lead_gen)
+    add_sample(kick_name,   lambda l: kick_drum(l, amp=1.0), play_len_mult=1)
+    add_sample(snare_name,  lambda l: snare_drum(l, amp=0.9), play_len_mult=1)
+    add_sample(hat_name,    lambda l: hi_hat(l, amp=0.7),     play_len_mult=1)
+
+    # 1-based indices for MOD samples in pack_note
+    sample_map = {
+        "chord1": 1,
+        "chord2": 2,
+        "lead":   3,
+        "kick":   4,
+        "snare":  5,
+        "hat":    6
+    }
+    return samples, sample_map
+
+def make_groove_plan(seed=None):
+    """
+    Build an 8-step drum plan favoring kick/snare/hat with occasional rests.
+    Returns a list like ['kick','hat','snare','rest',...]
+    """
+    if seed is not None:
+        random.seed(seed + 0x9E3779B9)
+
+    choices = ['kick','snare','hat','rest']
+    # bias toward kick on downbeats, snare on backbeats
+    plan = []
+    for i in range(8):
+        if i % 4 == 0:
+            plan.append('kick')
+        elif i % 4 == 2:
+            plan.append('snare')
+        else:
+            plan.append(random.choice(['hat','rest','hat']))
+    # small random mutation to avoid fixed pattern
+    for i in range(8):
+        if random.random() < 0.2:
+            plan[i] = random.choice(choices)
+    return plan
 
 # ----------------------------------------
 # MOD note periods & name mappings
@@ -172,24 +291,6 @@ def pack_note(period, sample_idx, effect=0, param=0) -> bytes:
     b2 = ((sample_idx & 0x0F) << 4) | (effect & 0x0F)
     b3 = param & 0xFF
     return bytes((b0,b1,b2,b3))
-
-def build_frame_notes(symbol: int, idx: int):
-    d0, d1 = SYMBOL_TO_DYAD[symbol]
-    p0 = PERIODS[NOTE_TO_MOD[d0]]; p1 = PERIODS[NOTE_TO_MOD[d1]]
-    arp = ARPEGGIO_SETS[symbol % len(ARPEGGIO_SETS)]
-    lead = LEAD_NOTES[arp[idx % len(arp)]]
-    p2  = PERIODS[NOTE_TO_MOD[lead]]
-    if DRUM_SEQ[idx % len(DRUM_SEQ)]:
-        samp3, p3 = 7, PERIODS["C-3"]
-    else:
-        bn, _ = BASS_SEQ[idx % len(BASS_SEQ)]
-        samp3, p3 = 3, PERIODS[NOTE_TO_MOD[bn]]
-    return (
-        pack_note(p0, 1),
-        pack_note(p1, 2),
-        pack_note(p2, 3),
-        pack_note(p3, samp3)
-    )
 
 def write_mod(filename: str, title: str, samples: list, order: list, patterns: list):
     with open(filename, "wb") as f:
@@ -222,7 +323,8 @@ def encode_to_mod(data: bytes,
                   encrypt: bool,
                   password: str,
                   out: str,
-                  title: str):
+                  title: str,
+                  seed: int = None):
     # Final payload length check before framing
     if len(data) > MAX_PAYLOAD:
         sys.exit(f"Payload too large for embedding: {len(data)} bytes > {MAX_PAYLOAD} bytes maximum")
@@ -247,30 +349,11 @@ def encode_to_mod(data: bytes,
              + bytes_to_nibbles(data)    \
              + bytes_to_nibbles(crc_b)
 
-    INST_DEFS = [
-        ("Sq50", lambda l: square_wave(440, l, 0.8, 0.50)),
-        ("Sq25", lambda l: square_wave(440, l, 0.8, 0.25)),
-        ("Tri ", lambda l: triangle_wave(440, l, 0.8)),
-        ("Saw ", lambda l: triangle_wave(440, l, 0.8)*2.0),
-        ("Pu75", lambda l: square_wave(440, l, 0.8, 0.75)),
-        ("Pu12", lambda l: square_wave(440, l, 0.8, 0.125)),
-        ("Noise",lambda l: white_noise(l, 0.5)),
-        ("Org  ",lambda l: (square_wave(440, l,0.4,0.25)+
-                             triangle_wave(440,l,0.4))*0.5),
-    ]
-    samples = []
-    samp_len = 1024
-    for name, gen in INST_DEFS:
-        buf = apply_fade(gen(samp_len*2))
-        samples.append({
-            "name":         name,
-            "length":       samp_len,
-            "finetune":     0,
-            "volume":       64,
-            "repeat_offset":0,
-            "repeat_length":1,
-            "wave":         buf
-        })
+    # Band setup: procedural instruments and groove plan
+    samples, sample_map = make_instrument_bank(seed)
+    drum_plan = make_groove_plan(seed)
+    # lead arpeggio offsets (per symbol) to vary melodies
+    arp_offsets = [random.randint(0,7) for _ in range(len(ARPEGGIO_SETS))]
 
     all_syms     = [0]*PREAMBLE_FRAMES + nibs
     total_frames = len(all_syms)
@@ -282,7 +365,42 @@ def encode_to_mod(data: bytes,
         for r in range(64):
             idx = p*64 + r
             sym = all_syms[idx] if idx < total_frames else 0
-            notes = build_frame_notes(sym, idx)
+
+            # Channels 0 & 1: chord dyad (critical for decode)
+            d0, d1 = SYMBOL_TO_DYAD[sym]
+            p0 = PERIODS[NOTE_TO_MOD[d0]]
+            p1 = PERIODS[NOTE_TO_MOD[d1]]
+
+            # Channel 2: lead melody with per-render arp offset
+            arp = ARPEGGIO_SETS[sym % len(ARPEGGIO_SETS)]
+            lead_note = LEAD_NOTES[arp[(idx + arp_offsets[sym % len(ARPEGGIO_SETS)]) % len(arp)]]
+            p2 = PERIODS[NOTE_TO_MOD[lead_note]]
+
+            # Channel 3: drums preferred (kick/snare/hat) based on drum_plan
+            step = drum_plan[idx % len(drum_plan)]
+            if step == 'kick':
+                samp4 = sample_map["kick"]
+                p4    = PERIODS["C-3"]
+            elif step == 'snare':
+                samp4 = sample_map["snare"]
+                p4    = PERIODS["C-3"]
+            elif step == 'hat':
+                samp4 = sample_map["hat"]
+                p4    = PERIODS["C-3"]
+            else:
+                # Optional: rest – use a silent note by employing an unused period with volume 0,
+                # but since we don't push effects here, we can place a low bass tone very quietly.
+                # Simpler: pick hat sample but it will be very short; or use a safe bass touch:
+                # We'll just place a hat with minimal impact (same period).
+                samp4 = sample_map["hat"]
+                p4    = PERIODS["C-3"]
+
+            notes = (
+                pack_note(p0, sample_map["chord1"]),
+                pack_note(p1, sample_map["chord2"]),
+                pack_note(p2, sample_map["lead"]),
+                pack_note(p4, samp4)
+            )
             pat.append((notes[0], notes[1], notes[2], notes[3]))
         patterns.append(pat)
 
@@ -290,6 +408,8 @@ def encode_to_mod(data: bytes,
     song_title = title if title else os.path.basename(out)
     write_mod(out, song_title, samples, order, patterns)
     print(f"Wrote {out}: {total_frames} frames → {num_patterns} patterns")
+    if seed is not None:
+        print(f"Render seed: {seed}")
 
 def decode_from_mod(path: str) -> bytes:
     with open(path, "rb") as f:
@@ -372,6 +492,7 @@ def main():
                     help="Compress payload with zstd before encryption")
     ap.add_argument("--encrypt",  action="store_true", help="Use encryption")
     ap.add_argument("--password", help="Password (optional)")
+    ap.add_argument("--seed",     type=lambda s: int(s, 0), help="Optional render seed (int, supports hex like 0xdeadbeef)")
     ap.add_argument("--decode",   help="Path to .MOD to decode")
     ap.add_argument("--outfile",  help="Path to write extracted file")
     args = ap.parse_args()
@@ -405,7 +526,8 @@ def main():
                       args.encrypt,
                       args.password,
                       args.out,
-                      args.title)
+                      args.title,
+                      args.seed)
 
     elif args.decode:
         pt = decode_from_mod(args.decode)
