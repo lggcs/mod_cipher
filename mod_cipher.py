@@ -411,7 +411,7 @@ def encode_to_mod(data: bytes,
     if seed is not None:
         print(f"Render seed: {seed}")
 
-def decode_from_mod(path: str) -> bytes:
+def decode_from_mod(path: str, password: str = None) -> bytes:
     with open(path, "rb") as f:
         f.seek(20 + 31*30)
         song_len,_ = struct.unpack("BB", f.read(2))
@@ -453,7 +453,8 @@ def decode_from_mod(path: str) -> bytes:
     if payload_b.startswith(ENC_MAGIC):
         if not HAS_CRYPTO:
             print("Encrypted data; install crypto libs"); return None
-        pw    = getpass.getpass("Password: ")
+        # Use provided password if available; otherwise prompt.
+        pw    = password if password is not None else getpass.getpass("Password: ")
         salt  = payload_b[4:4+SALT_LEN]
         nonce = payload_b[4+SALT_LEN:4+SALT_LEN+NONCE_LEN]
         ct    = payload_b[4+SALT_LEN+NONCE_LEN:]
@@ -530,7 +531,7 @@ def main():
                       args.seed)
 
     elif args.decode:
-        pt = decode_from_mod(args.decode)
+        pt = decode_from_mod(args.decode, args.password)
         if pt is None:
             sys.exit(1)
         if args.outfile:
