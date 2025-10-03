@@ -77,6 +77,7 @@ If no `--outfile` is given, the tool will attempt to print the decoded payload a
 | `--password`  | Password for encryption (optional, otherwise prompted) |
 | `--decode`    | Decode a `.MOD` back into data |
 | `--outfile`   | File to write extracted payload |
+| `--seed`      | Use a specific hex seed (e.g. 0xdeadbeef) rather than RNG |
 
 
 ## ⚠️ Limitations
